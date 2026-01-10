@@ -1,12 +1,16 @@
 import os
 from dotenv import load_dotenv
 import logging
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import asyncio
+from scipy.signal import argrelextrema
 from models.models import forecast_pipeline
+
 
 ##################################################################################################
 # Окружение
@@ -15,10 +19,16 @@ from models.models import forecast_pipeline
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Логгирование в консоль
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
+# Настройки логирования
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+
+logging.basicConfig(filename='logs/logs.txt', filemode='a', level=logging.WARNING, format='%(message)s')
+logger = logging.getLogger(__name__)
+def log_user_request(user_id, date_time, ticker, amount, best_model, metric_value, profit):
+    """Функция логгирует действия пользователя в текстовом файле.
+    """
+    logger.warning(f"{user_id};{date_time};{ticker};{amount};{best_model};{metric_value};{profit}")
 
 
 ##################################################################################################
@@ -52,7 +62,34 @@ async def combined_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await process_data(ticker, investment_amount, update, context)
 
+# Расчет инвестиционных рекомендаций
+def calculate_profit(initial_investment, buy_prices, sell_prices, future_pred):
+    """Функция рассчитывает итоговый баланс при следовании торговой стратегии
+    """
+    capital = initial_investment
+    profit = 0
+    shares = 0
+
+    # Покупаем в точках минимума, продаем в точках максимума
+    for buy_price, sell_price in zip(buy_prices, sell_prices):
+        # Покупка на всю сумму
+        num_shares = capital // buy_price
+        remaining_capital = capital % buy_price
+        shares += num_shares
+        capital -= num_shares * buy_price
+
+        # Продажа купленных акций
+        sold_amount = num_shares * sell_price
+        profit += sold_amount
+        capital += sold_amount
+
+    # Остаток капитала + стоимость оставшихся акций
+    final_capital = capital + shares * future_pred[-1]
+    total_profit = final_capital - initial_investment
+    return total_profit
+
 # Загрузка исторических данных из Yahoo
+# Прогноз цен на акции и расчет торговой стратегии
 async def process_data(ticker: str, investment_amount: float, update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Получаем данные за последние два года
@@ -73,14 +110,47 @@ async def process_data(ticker: str, investment_amount: float, update: Update, co
         # Заглушка в чат
         await update.message.reply_text("Расчет метрик...", reply_markup=reply_markup)
 
-        # Обучение моделей
-        best_model_name, best_rmse, best_mape, change, buf = forecast_pipeline(data)
+        # Сравниваем модели, получаем прогнозы и метрики
+        best_model_name, best_rmse, best_mape, future_pred, change, buf = forecast_pipeline(data)
 
-        # Вывод результатов
-        await update.message.reply_text(f"Лучшая модель: {best_model_name}\nRMSE: {best_rmse:.2f}\nMAPE: {best_mape:.2f}", reply_markup=reply_markup)
-        await update.message.reply_text(f"Разница с текущей ценой акций {ticker} через 30 дней составит: {change:.2f}%", reply_markup=reply_markup)
+        # Находим экстремумы цен
+        local_max_indices = argrelextrema(future_pred, np.greater)[0]
+        local_min_indices = argrelextrema(future_pred, np.less)[0]
+        if (not local_max_indices.size > 0 or not local_min_indices > 0) and future_pred[0] < future_pred[-1]:
+            local_min_indices = 0
+            local_max_indices = future_pred[-1]
+        buy_prices = future_pred[local_min_indices]
+        sell_prices = future_pred[local_max_indices]
 
-        # Отправляем график
+        # Рассчитываем прибыль
+        total_profit = calculate_profit(investment_amount, buy_prices, sell_prices, future_pred)
+
+        # Записываем лог
+        log_user_request(
+            user_id=update.effective_user.id,
+            date_time=str(datetime.now()),
+            ticker=ticker,
+            amount=investment_amount,
+            best_model=best_model_name,
+            metric_value=best_rmse,
+            profit=total_profit
+        )
+
+        # Формируем ответ пользователю
+        summary_message = f"""📈 Прогноз цен акций для {ticker}:
+⭐ Лучшая модель: {best_model_name}
+🎯 Качество модели (RMSE): {best_rmse:.2f}
+💨 Средняя абсолютная ошибка (MAPE): {best_mape:.2f}%
+
+📊 Прогноз на 30 дней вперед:
+🟢 Дни для покупки: {local_min_indices.tolist()}
+🔴 Дни для продажи: {local_max_indices.tolist()}
+↔️ Разница с текущей ценой через 30 дней: {change:.2f}%
+
+💰 При инвестициях в размере {investment_amount:,.2f} руб. и следовании торговой стратегии, сумма итогового портфеля составит: {total_profit:,.2f} руб."""
+
+        # Вывод ответа
+        await update.message.reply_text(summary_message, reply_markup=reply_markup)
         await update.message.reply_photo(photo=buf.read(), caption="Прогноз цен акций")
 
     except Exception as e:

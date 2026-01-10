@@ -212,7 +212,7 @@ def forecast_pipeline(data):
 
     # Выполняем прогноз на 30 дней
     future_dates, future_pred = make_forecast(best_model_name, best_model_object, data)
-
+    
     # Визуализируем график с историей и предсказанием
     buf = visualize_forecast(data, future_dates, future_pred)
 
@@ -221,7 +221,7 @@ def forecast_pipeline(data):
     future_price = future_pred[-1]
     change = (future_price - current_price) / current_price * 100
 
-    return best_model_name, best_rmse, best_mape, change, buf
+    return best_model_name, best_rmse, best_mape, future_pred, change, buf
 
 # Запуск из-под скрипта
 if __name__ == '__main__':
