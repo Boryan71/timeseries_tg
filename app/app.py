@@ -116,7 +116,7 @@ async def process_data(ticker: str, investment_amount: float, update: Update, co
         # Находим экстремумы цен
         local_max_indices = argrelextrema(future_pred, np.greater)[0]
         local_min_indices = argrelextrema(future_pred, np.less)[0]
-        if (not local_max_indices.size > 0 or not local_min_indices > 0) and future_pred[0] < future_pred[-1]:
+        if (not local_max_indices.size > 0 or not local_min_indices.size > 0) and future_pred[0] < future_pred[-1]:
             local_min_indices = 0
             local_max_indices = future_pred[-1]
         buy_prices = future_pred[local_min_indices]
