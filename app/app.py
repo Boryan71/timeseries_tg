@@ -5,6 +5,8 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import yfinance as yf
 import pandas as pd
+import asyncio
+from models.models import forecast_pipeline
 
 ##################################################################################################
 # Окружение
@@ -54,16 +56,32 @@ async def combined_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def process_data(ticker: str, investment_amount: float, update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Получаем данные за последние два года
-        data = yf.download(ticker, period="2y")
+        data_raw = yf.download(ticker, period="2y")
 
         # Проверка пустого ответа
-        if data.empty:
+        if data_raw.empty:
             await update.message.reply_text(f"К сожалению, не найдены данные по тикеру {ticker}.", reply_markup=reply_markup)
             return
 
-        # Заглушка, выводим первую строку
-        first_row = data.iloc[0]
-        await update.message.reply_text(f"Данные загружены!\n\nПервая запись: {first_row.to_string()}", reply_markup=reply_markup)
+        # Обработка данных
+        data_close = data_raw['Close'][ticker].copy()
+        data_preprocess = pd.DataFrame(data_close)
+        data_preprocess['Date'] = data_preprocess.index
+        data = data_preprocess.reset_index(drop=True)
+        data = data.rename(columns={ticker: 'Close'})
+
+        # Заглушка в чат
+        await update.message.reply_text("Расчет метрик...", reply_markup=reply_markup)
+
+        # Обучение моделей
+        best_model_name, best_rmse, best_mape, change, buf = forecast_pipeline(data)
+
+        # Вывод результатов
+        await update.message.reply_text(f"Лучшая модель: {best_model_name}\nRMSE: {best_rmse:.2f}\nMAPE: {best_mape:.2f}", reply_markup=reply_markup)
+        await update.message.reply_text(f"Разница с текущей ценой акций {ticker} через 30 дней составит: {change:.2f}%", reply_markup=reply_markup)
+
+        # Отправляем график
+        await update.message.reply_photo(photo=buf.read(), caption="Прогноз цен акций")
 
     except Exception as e:
         await update.message.reply_text(f"Возникла ошибка при загрузке данных: {e}", reply_markup=reply_markup)
